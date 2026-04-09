@@ -1,0 +1,6 @@
+{
+  "vk_user_token": "YOUR_VK_USER_TOKEN_HERE",
+  "huggingface_token": "YOUR_HUGGINGFACE_TOKEN_HERE",
+  "group_id": "YOUR_GROUP_ID_HERE",
+  "max_profiles": 100
+}
