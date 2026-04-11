@@ -1,198 +1,361 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Шаг 3: Генерация HTML-отчета по результатам анализа.
-
-Этот скрипт:
-- Загружает проанализированные профили из analyzed_profiles.json
-- Сортирует по совместимости (compatibility_score)
-- Генерирует красивый HTML-отчёт с топ-кандидатами (score ≥ 80)
-- Сохраняет отчёт в result_report.html
-
-Выходные данные: result_report.html
-"""
-
 import json
+import os
+import sys
 from datetime import datetime
-from typing import List, Dict, Any
 
+# --- Конфигурация ---
+INPUT_FILE = 'analyzed_profiles_live.json'
+OUTPUT_FILE = 'result_report.html'
+MIN_SCORE_THRESHOLD = 70  # Показывать только профили с совместимостью от этого значения
 
-def load_config():
-    """Загрузка конфигурации из config.json"""
-    with open('config.json', 'r', encoding='utf-8') as f:
+def load_data():
+    if not os.path.exists(INPUT_FILE):
+        print(f"❌ Файл {INPUT_FILE} не найден. Сначала запустите step1_2_pipeline.py")
+        sys.exit(1)
+    
+    with open(INPUT_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
+def generate_big_five_html(scores):
+    """Генерирует HTML строки для графиков Big Five"""
+    labels = {
+        'openness': ('Открытость', '#9b59b6'),
+        'conscientiousness': ('Добросовестность', '#3498db'),
+        'extraversion': ('Экстраверсия', '#f1c40f'),
+        'agreeableness': ('Доброжелательность', '#2ecc71'),
+        'neuroticism': ('Нейротизм', '#e74c3c') 
+    }
+    
+    html = ""
+    for key, (label, color) in labels.items():
+        val = scores.get(key, 0)
+        # Для нейротизма визуально показываем инверсию (чем меньше, тем лучше), но шкала остается 0-100
+        html += f"""
+        <div class="trait-row">
+            <div class="trait-label">{label}</div>
+            <div class="progress-bg">
+                <div class="progress-bar" style="width: {val}%; background-color: {color};"></div>
+            </div>
+            <div class="trait-value">{val}</div>
+        </div>
+        """
+    return html
 
-def load_analyzed_profiles(filename='analyzed_profiles.json'):
-    """Загрузка проанализированных профилей"""
-    with open(filename, 'r', encoding='utf-8') as f:
-        return json.load(f)
+def generate_profile_card(profile, index):
+    analysis = profile.get('analysis', {})
+    big_five = analysis.get('big_five', {})
+    score = analysis.get('compatibility_score', 0)
+    
+    # Данные профиля
+    name = f"{profile.get('first_name')} {profile.get('last_name', '')}"
+    age = "?"
+    if bdate := profile.get('bdate'):
+        try:
+            year = int(bdate.split('.')[-1])
+            age = str(datetime.now().year - year)
+        except:
+            pass
+            
+    city = profile.get('city', 'Unknown')
+    if isinstance(city, dict): city = city.get('title', 'Unknown')
+    
+    vk_id = profile.get('id')
+    screen_name = profile.get('screen_name', f"id{vk_id}")
+    url = f"https://vk.com/{screen_name}"
+    
+    # Интерпретация результатов
+    humor = analysis.get('humor_style', 'Не определен')
+    summary = analysis.get('summary', 'Нет описания')
+    red_flags = analysis.get('red_flags', [])
+    message = analysis.get('generated_message', 'Сообщение не сгенерировано').replace('"', '&quot;')
+    
+    # Цвет скоринга
+    score_color = "#27ae60" if score >= 85 else "#f39c12" if score >= 70 else "#c0392b"
+    
+    flags_html = ""
+    if red_flags:
+        flags_html = "<div class='flags-list'>" + "".join([f"<span class='flag-item'>🚩 {flag}</span>" for flag in red_flags]) + "</div>"
+    else:
+        flags_html = "<div class='flags-clean'>✅ Красных флагов не обнаружено</div>"
 
+    chart_html = generate_big_five_html(big_five)
 
-def sort_by_score(profiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Сортировка профилей по score (убывание)"""
-    return sorted(
-        profiles,
-        key=lambda x: x.get('analysis', {}).get('compatibility_score', 0),
-        reverse=True
-    )
+    return f"""
+    <div class="profile-card">
+        <div class="card-header">
+            <div class="rank-badge">#{index}</div>
+            <div class="score-badge" style="border-color: {score_color}; color: {score_color};">
+                СОВМЕСТИМОСТЬ: {score}%
+            </div>
+            <a href="{url}" target="_blank" class="vk-link">Открыть профиль VK ↗</a>
+        </div>
+        
+        <div class="profile-info">
+            <h2>{name} <span class="age-badge">{age} лет</span></h2>
+            <p class="location">📍 {city}</p>
+            <p class="humor-type">🎭 Тип юмора: <strong>{humor}</strong></p>
+        </div>
 
+        <div class="analysis-section">
+            <h3>🧠 Психологический портрет</h3>
+            <p class="summary-text">{summary}</p>
+            
+            <div class="big-five-container">
+                {chart_html}
+            </div>
+        </div>
 
-def generate_html_report(profiles: List[Dict[str, Any]], config: Dict[str, Any]) -> str:
-    """Генерация HTML-отчёта"""
-    # Общая статистика
-    total = len(profiles)
-    successful = sum(1 for p in profiles if 'error' not in p.get('analysis', {}))
+        <div class="risk-section">
+            <h3>⚠️ Зоны риска</h3>
+            {flags_html}
+        </div>
 
-    # Отбираем кандидатов с score >= 80
-    high_score_candidates = []
-    for p in profiles:
-        analysis = p.get('analysis', {})
-        if 'error' not in analysis:
-            score = analysis.get('compatibility_score', 0)
-            if score >= 8:
-                high_score_candidates.append(p)
+        <div class="message-section">
+            <h3>💌 Готовое сообщение для знакомства</h3>
+            <div class="message-box">
+                {message.replace(chr(10), '<br>')}
+            </div>
+            <button class="copy-btn" onclick="copyMessage(this, '{message.replace(chr(10), '\\n').replace("'", "\\'")}')">
+                📋 Скопировать сообщение
+            </button>
+        </div>
+    </div>
+    """
 
-    # Сортируем по убыванию score
-    high_score_candidates.sort(
-        key=lambda x: x.get('analysis', {}).get('compatibility_score', 0),
-        reverse=True
-    )
-
-    group_id = config.get('group_id', 'не указана')
-    now = datetime.now()
-    date_str = now.strftime('%d.%m.%Y %H:%M')
-
-    # Начало HTML
-    html = f"""<!DOCTYPE html>
+def generate_html_header(total, count, threshold):
+    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"""
+<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Отчёт по стратегии «Веселый нрав» – только лучшие кандидаты</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Отчет: Поиск партнера (Москва)</title>
     <style>
-        body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f0f2f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        h1, h2 {{ color: #1e3c72; }}
-        .candidate {{ background: white; margin-bottom: 30px; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-        .candidate h3 {{ margin-top: 0; color: #0a4b6e; border-left: 5px solid #27ae60; padding-left: 12px; }}
-        .score {{ font-size: 1.4em; font-weight: bold; color: #27ae60; }}
-        .big-five {{ display: flex; gap: 15px; flex-wrap: wrap; margin: 15px 0; }}
-        .big-five span {{ background: #eef2f7; padding: 6px 12px; border-radius: 25px; font-size: 0.9em; }}
-        .humor {{ background: #fff4e6; padding: 10px; border-left: 5px solid #f39c12; margin: 10px 0; }}
-        .reason {{ background: #e8f8f5; padding: 10px; border-left: 5px solid #1abc9c; margin: 10px 0; }}
-        .link {{ word-break: break-all; font-size: 0.9em; color: #2980b9; }}
-        hr {{ margin: 20px 0; }}
-        .badge {{ display: inline-block; background: #27ae60; color: white; border-radius: 20px; padding: 2px 10px; font-size: 0.8em; margin-left: 10px; }}
+        :root {{
+            --bg-color: #f4f7f6;
+            --card-bg: #ffffff;
+            --text-main: #2c3e50;
+            --text-secondary: #7f8c8d;
+            --accent: #3498db;
+        }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            line-height: 1.6;
+        }}
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+        }}
+        header {{
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: var(--card-bg);
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }}
+        h1 {{ margin: 0; color: #2c3e50; }}
+        .stats {{ color: var(--text-secondary); margin-top: 10px; }}
+        
+        .profile-card {{
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            transition: transform 0.2s;
+        }}
+        .profile-card:hover {{
+            transform: translateY(-2px);
+        }}
+        
+        .card-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 15px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }}
+        .rank-badge {{
+            background: #ecf0f1;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-weight: bold;
+            color: #7f8c8d;
+        }}
+        .score-badge {{
+            font-size: 1.2em;
+            font-weight: bold;
+            padding: 5px 15px;
+            border: 2px solid;
+            border-radius: 8px;
+        }}
+        .vk-link {{
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 600;
+        }}
+        
+        .profile-info h2 {{ margin: 0; display: inline; }}
+        .age-badge {{ background: #e1f0fa; color: #3498db; padding: 2px 8px; border-radius: 4px; font-size: 0.9em; }}
+        .location, .humor-type {{ color: var(--text-secondary); margin: 5px 0; }}
+        
+        .analysis-section, .risk-section, .message-section {{
+            margin-top: 20px;
+            background: #fafafa;
+            padding: 15px;
+            border-radius: 8px;
+        }}
+        h3 {{ margin-top: 0; font-size: 1.1em; color: #34495e; }}
+        
+        .big-five-container {{
+            margin-top: 15px;
+        }}
+        .trait-row {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }}
+        .trait-label {{ width: 130px; font-weight: 600; }}
+        .progress-bg {{
+            flex-grow: 1;
+            height: 10px;
+            background: #e0e0e0;
+            border-radius: 5px;
+            margin: 0 10px;
+            overflow: hidden;
+        }}
+        .progress-bar {{
+            height: 100%;
+            border-radius: 5px;
+            transition: width 0.5s ease;
+        }}
+        .trait-value {{ width: 30px; text-align: right; font-weight: bold; }}
+        
+        .flags-list {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+        .flag-item {{ background: #fadbd8; color: #c0392b; padding: 4px 10px; border-radius: 4px; font-size: 0.9em; }}
+        .flags-clean {{ color: #27ae60; font-weight: 600; }}
+        
+        .message-box {{
+            background: #fff;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 6px;
+            font-style: italic;
+            color: #555;
+            margin-bottom: 10px;
+            white-space: pre-wrap;
+        }}
+        .copy-btn {{
+            background: #2ecc71;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: background 0.2s;
+        }}
+        .copy-btn:hover {{ background: #27ae60; }}
+        .copy-btn:active {{ transform: scale(0.98); }}
+        .copy-btn.copied {{ background: #34495e; }}
+        
+        @media (max-width: 600px) {{
+            .card-header {{ flex-direction: column; align-items: flex-start; }}
+            .trait-label {{ width: 100px; font-size: 0.8em; }}
+        }}
     </style>
 </head>
 <body>
-<div class="container">
-    <h1>📊 Отчёт по стратегии «Веселый нрав»</h1>
-    <p><strong>Дата анализа:</strong> {date_str}</p>
-    <p><strong>Источник:</strong> VK-сообщество (группа {group_id})</p>
-    <p><strong>Всего обработано профилей:</strong> {total}</p>
-    <p><strong>Кандидатов с высоким соответствием (score ≥ 80):</strong> {len(high_score_candidates)}</p>
-    <hr>
+    <div class="container">
+        <header>
+            <h1>💘 Отчет: Поиск партнера с «Веселым Нравом»</h1>
+            <div class="stats">
+                📅 {date_str} | Всего профилей: {total} | Подходящих (Скор ≥ {threshold}): <strong>{count}</strong>
+            </div>
+            <p style="font-size: 0.9em; color: #7f8c8d; max-width: 600px; margin: 10px auto;">
+                Критерии: Высокая экстраверсия, низкий нейротизм, адаптивный юмор. 
+                Сообщения сгенерированы индивидуально под психотип.
+            </p>
+        </header>
 """
 
-    # Если нет кандидатов
-    if not high_score_candidates:
-        html += "<p>⚠️ Кандидатов с высоким скором не найдено.</p>"
-    else:
-        # Для каждого кандидата создаём блок
-        for profile in high_score_candidates:
-            first_name = profile.get('first_name', '')
-            last_name = profile.get('last_name', '')
-            user_id = profile.get('id', '')
-            screen_name = profile.get('screen_name', f'id{user_id}')
-            # Ссылка: если screen_name числовой или пустой, используем id, иначе screen_name
-            if screen_name and not screen_name.isdigit():
-                link = f"https://vk.com/{screen_name}"
-            else:
-                link = f"https://vk.com/id{user_id}"
-
-            analysis = profile.get('analysis', {})
-            score = analysis.get('compatibility_score', 0)
-            big_five = analysis.get('big_five', {})
-            humor_type = analysis.get('humor_type', 'не определён')
-            humor_analysis = analysis.get('humor_analysis', '')
-            reason = analysis.get('reason', '')
-
-            # Извлечение подписок (до 5 штук) для юмористического контекста
-            subscriptions = profile.get('subscriptions', [])
-            subs_text = ', '.join(subscriptions[:5]) if subscriptions else 'нет данных'
-
-            # Формирование строки для блока юмора
-            humor_text = f"<strong>{humor_type}</strong><br>"
-            if humor_analysis:
-                humor_text += f"{humor_analysis} "
-            if subscriptions:
-                humor_text += f"Подписки: {subs_text}"
-            else:
-                humor_text += "Нет подписок на юмористические паблики."
-
-            # Значения Big Five (по умолчанию 0)
-            extraversion = big_five.get('extraversion', 0)
-            emotional_stability = big_five.get('emotional_stability', 0)
-            openness = big_five.get('openness', 0)
-            conscientiousness = big_five.get('conscientiousness', 0)
-
-            html += f"""
-    <div class="candidate">
-        <h3>✅ {first_name} {last_name} <span class="badge">ID {user_id}</span></h3>
-        <div class="link">🔗 <a href="{link}" target="_blank">{link}</a></div>
-        <div class="score">🎯 Совместимость: {score}/100</div>
-        <div class="big-five">
-            <span>🧩 Экстраверсия: {extraversion}/10</span>
-            <span>🧠 Эмоц. стабильность: {emotional_stability}/10</span>
-            <span>🌟 Открытость: {openness}/10</span>
-            <span>📋 Добросовестность: {conscientiousness}/10</span>
-        </div>
-        <div class="humor">🎭 Тип юмора: {humor_text}</div>
-        <div class="reason">💡 <strong>Почему подходит:</strong> {reason}</div>
+def generate_html_footer():
+    return """
     </div>
-"""
-
-    # Закрывающие теги
-    html += """
-</div>
+    <script>
+        function copyMessage(btn, text) {
+            // Создаем временный textarea для копирования
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            
+            // Визуальный фидбек
+            const originalText = btn.innerText;
+            btn.innerText = "✅ Скопировано!";
+            btn.classList.add('copied');
+            
+            setTimeout(() => {
+                btn.innerText = originalText;
+                btn.classList.remove('copied');
+            }, 2000);
+        }
+    </script>
 </body>
-</html>"""
-    return html
-
+</html>
+"""
 
 def main():
-    """Основная функция"""
-    print("=" * 60)
+    print("="*60)
     print("ШАГ 3: Генерация HTML-отчета")
-    print("=" * 60)
-
-    # Загрузка конфигурации
-    config = load_config()
-
-    # Загрузка проанализированных профилей
-    profiles = load_analyzed_profiles()
-
-    if not profiles:
-        print("Нет данных для генерации отчета. Сначала запустите step1_collect_profiles.py и step2_analyze.py")
+    print("="*60)
+    
+    data = load_data()
+    print(f"📂 Загружено профилей: {len(data)}")
+    
+    # Фильтрация: только те, у кого есть анализ и высокий скор
+    valid_profiles = [
+        p for p in data 
+        if 'analysis' in p and p.get('analysis', {}).get('compatibility_score', 0) >= MIN_SCORE_THRESHOLD
+    ]
+    
+    print(f"✅ Найдено {len(valid_profiles)} подходящих профилей (Скор ≥ {MIN_SCORE_THRESHOLD}).")
+    
+    if not valid_profiles:
+        print("❌ Нет подходящих кандидатов. Попробуйте снизить порог в коде скрипта.")
         return
 
-    print(f"Загружено {len(profiles)} проанализированных профилей")
-
+    # Сортировка по совместимости (убывание)
+    valid_profiles.sort(key=lambda x: x['analysis'].get('compatibility_score', 0), reverse=True)
+    
     # Генерация HTML
-    html_report = generate_html_report(profiles, config)
-
-    # Сохранение отчета
-    output_file = 'result_report.html'
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(html_report)
-
-    print(f"\n✓ Отчет сохранен в {output_file}")
-    print("\n" + "=" * 60)
-    print("Пайплайн завершен!")
-    print("Откройте result_report.html для просмотра результатов")
-    print("=" * 60)
-
+    html_content = generate_html_header(len(data), len(valid_profiles), MIN_SCORE_THRESHOLD)
+    
+    for i, profile in enumerate(valid_profiles, 1):
+        html_content += generate_profile_card(profile, i)
+        
+    html_content += generate_html_footer()
+    
+    # Сохранение
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+        
+    print(f"📄 Отчет успешно сохранен в {OUTPUT_FILE}")
+    print(f"🌟 Лучший кандидат: {valid_profiles[0].get('first_name')} (Скор: {valid_profiles[0]['analysis']['compatibility_score']})")
+    print(f"🚀 Откройте файл в браузере, чтобы скопировать сообщения одним кликом.")
 
 if __name__ == '__main__':
     main()
