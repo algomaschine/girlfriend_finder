@@ -106,15 +106,35 @@ def filter_profiles(members):
 
 
 def get_extended_profile(session, user_id):
-    """Получение расширенной информации о профиле"""
+    """Получение расширенной информации о профиле с проверкой доступности"""
     try:
         response = session.method('users.get', {
             'user_ids': user_id,
-            'fields': 'about,activities,interests,music,movies,tv,books,games,status,quotes,personal,city,bdate,education,site,contacts'
+            'fields': 'about,activities,interests,music,movies,tv,books,games,status,quotes,personal,city,bdate,education,site,contacts,is_closed,last_seen'
         })
         
         if response:
-            return response[0]
+            profile = response[0]
+            
+            # ПОВТОРНАЯ проверка на закрытость профиля после получения полных данных
+            if profile.get('is_closed', False):
+                print(f"   ⚠️ Профиль {user_id} закрыт (пропущен)")
+                return None
+            
+            # Проверка на активность (last_seen)
+            last_seen = profile.get('last_seen')
+            if last_seen:
+                import time
+                current_time = int(time.time())
+                time_since_seen = current_time - last_seen.get('time', 0)
+                days_since_seen = time_since_seen / (24 * 3600)
+                
+                # Если не был в сети больше 90 дней - считаем неактивным
+                if days_since_seen > 90:
+                    print(f"   ⚠️ Профиль {user_id} неактивен ({int(days_since_seen)} дн. назад) (пропущен)")
+                    return None
+            
+            return profile
         return None
         
     except vk_api.exceptions.ApiError as e:
