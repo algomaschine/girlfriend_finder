@@ -95,8 +95,12 @@ def get_profile_subscriptions(vk, user_id):
         if e.code == 6: # Too many requests
             time.sleep(1)
             return get_profile_subscriptions(vk, user_id)
+        elif e.code == 15: # Access denied - профиль закрыт
+            print(f"   ⚠️ Профиль {user_id} закрыт (доступ запрещён)")
+            return None
         return [] # Приватный профиль или ошибки
-    except:
+    except Exception as e:
+        print(f"   ⚠️ Ошибка получения подписок {user_id}: {e}")
         return []
 
 # --- ПРОМПТЫ ДЛЯ АНАЛИЗА (Scientific Approach) ---
@@ -248,11 +252,41 @@ def analyze_single_profile(vk, profile):
     if not is_moscow(profile.get('city')):
         return None, "Отклонено: не Москва"
 
-    # 3. Сбор доп. данных (подписки)
+    # 3. ПОВТОРНАЯ проверка на закрытость профиля через users.get
+    try:
+        user_check = vk.method('users.get', {'user_ids': uid, 'fields': 'is_closed,last_seen'})
+        if user_check and len(user_check) > 0:
+            user_info = user_check[0]
+            
+            # Проверка is_closed
+            if user_info.get('is_closed', False):
+                print(f"   ⚠️ Профиль {uid} закрыт (пропущен)")
+                return None, "Профиль закрыт"
+            
+            # Проверка last_seen (активность)
+            last_seen = user_info.get('last_seen')
+            if last_seen:
+                import time
+                current_time = int(time.time())
+                time_since_seen = current_time - last_seen.get('time', 0)
+                days_since_seen = time_since_seen / (24 * 3600)
+                
+                # Если не был в сети больше 90 дней - считаем неактивным
+                if days_since_seen > 90:
+                    print(f"   ⚠️ Профиль {uid} неактивен ({int(days_since_seen)} дн. назад) (пропущен)")
+                    return None, "Профиль неактивен"
+    except Exception as e:
+        print(f"   ⚠️ Ошибка проверки профиля {uid}: {e}")
+        return None, "Ошибка проверки доступа"
+
+    # 4. Сбор доп. данных (подписки)
     # Если в профиле уже есть subscriptions, используем их, иначе грузим
     subs = profile.get('subscriptions', [])
     if not subs:
         subs = get_profile_subscriptions(vk, uid)
+        # Если получили None (закрытый профиль), пропускаем
+        if subs is None:
+            return None, "Подписки недоступны (закрытый профиль)"
         profile['subscriptions'] = subs # Сохраняем в профиль
 
     # Формирование контекста
@@ -334,14 +368,14 @@ def main():
     offset = 0
     count = 100
 
-    # Собираем пачками, сразу фильтруя по полу и городу (базово)
+    # Собираем пачками, сразу фильтруя по полу, городу и семейному положению (базово)
     while True:
         try:
             resp = vk.method('groups.getMembers', {
                 'group_id': group_id,
                 'offset': offset,
                 'count': count,
-                'fields': 'sex,city,bdate,status'
+                'fields': 'sex,city,bdate,status,relation,is_closed'
             })
             items = resp.get('items', [])
             if not items:
@@ -353,6 +387,17 @@ def main():
                 if p.get('sex') != 1: # Только женщины
                     continue
                 if not is_moscow(p.get('city')):
+                    continue
+                
+                # Проверка на закрытый профиль уже на этапе сбора
+                if p.get('is_closed', False):
+                    continue
+                
+                # Проверка семейного положения (только свободные)
+                relation = p.get('relation', 0)
+                # relation: 0-не указано, 1-не замужем, 2-есть друг, 3-помолвлена, 
+                # 4-замужем, 5-в активном поиске, 6-влюблена, 7-влюблена, 8-в гражданском браке
+                if relation in [2, 3, 4, 7, 8]:
                     continue
 
                 new_candidates.append(p)
