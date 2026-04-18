@@ -247,6 +247,18 @@ def analyze_single_profile(vk, profile):
     bdate = profile.get('bdate', '')
     year = parse_bdate(bdate)
 
+    # 0. Проверка на деактивированный профиль (забанен/удален)
+    # Если first_name пустой или профиль помечен как deactivation
+    if not name or name.strip() == '':
+        print(f"   ⚠️ Профиль {uid} деактивирован (пустое имя) (пропущен)")
+        return None, "Профиль деактивирован"
+    
+    # Проверка photo_200 или photo_max - если нет фото, пропускаем
+    has_photo = profile.get('photo_200') or profile.get('photo_max') or profile.get('photo_100')
+    if not has_photo:
+        print(f"   ⚠️ Профиль {uid} без аватарки (пропущен)")
+        return None, "Нет фото профиля"
+
     # 1. Фильтр по году
     if year and year < MIN_BIRTH_YEAR:
         return None, f"Отклонено: год рождения {year} < {MIN_BIRTH_YEAR}"
@@ -277,7 +289,15 @@ def analyze_single_profile(vk, profile):
     if not is_moscow(profile.get('city')):
         return None, "Отклонено: не Москва"
 
-    # 4. Сбор доп. данных (подписки)
+    # 5. Повторная проверка семейного положения (только свободные)
+    relation = profile.get('relation', 0)
+    # relation: 0-не указано, 1-не замужем, 2-есть друг, 3-помолвлена, 
+    # 4-замужем, 5-в активном поиске, 6-влюблена, 7-влюблена, 8-в гражданском браке
+    if relation in [2, 3, 4, 7, 8]:
+        print(f"   ⚠️ Профиль {uid} имеет статус отношений (relation={relation}) (пропущен)")
+        return None, "Есть отношения"
+
+    # 6. Сбор доп. данных (подписки)
     # Если в профиле уже есть subscriptions, используем их, иначе грузим
     subs = profile.get('subscriptions', [])
     if not subs:
@@ -399,6 +419,15 @@ def main():
                     # relation: 0-не указано, 1-не замужем, 2-есть друг, 3-помолвлена, 
                     # 4-замужем, 5-в активном поиске, 6-влюблена, 7-влюблена, 8-в гражданском браке
                     if relation in [2, 3, 4, 7, 8]:
+                        continue
+                    
+                    # Проверка на деактивированный профиль (пустое имя)
+                    if not p.get('first_name') or p.get('first_name', '').strip() == '':
+                        continue
+                    
+                    # Проверка наличия фото (userpic)
+                    has_photo = p.get('photo_200') or p.get('photo_max') or p.get('photo_100')
+                    if not has_photo:
                         continue
 
                     new_candidates.append(p)

@@ -8,6 +8,7 @@ __pycache__/
 # Logs and temp files
 *.log
 *.tmp
+*.swp
 
 # Environment
 .env
@@ -28,14 +29,12 @@ dist/
 build/
 target/
 
-# Testing
+# Coverage
 .coverage
+coverage/
 htmlcov/
-.coverage.*
+
+# Testing
 .pytest_cache/
 .mypy_cache/
-
-# OS
-.DS_Store
-Thumbs.db
 ```
