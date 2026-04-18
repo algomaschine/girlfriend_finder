@@ -120,6 +120,10 @@ def get_profile_subscriptions(vk, user_id):
     """Получает подписки (группы) для анализа интересов"""
     try:
         subs = vk.method('groups.get', {'user_id': user_id, 'count': 50, 'extended': 0})
+        # Если вернулось число - это общее кол-во, нужно запросить с items
+        if isinstance(subs, int):
+            subs = vk.method('groups.get', {'user_id': user_id, 'count': 50, 'extended': 1})
+            return [g['name'] for g in subs.get('items', [])]
         return [g['name'] for g in subs.get('items', [])]
     except vk_api.exceptions.ApiError as e:
         if e.code == 6: # Too many requests
