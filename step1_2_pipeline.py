@@ -117,24 +117,32 @@ def is_moscow(city_data):
     return title.lower() in ['москва', 'moscow', 'msk', 'мск']
 
 def get_profile_subscriptions(vk, user_id):
-    """Получает подписки (группы) для анализа интересов"""
+    """Получает подписки (группы) для анализа интересов - максимум 50 шт"""
     try:
-        subs = vk.method('groups.get', {'user_id': user_id, 'count': 50, 'extended': 0})
-        # Если вернулось число - это общее кол-во, нужно запросить с items
-        if isinstance(subs, int):
-            subs = vk.method('groups.get', {'user_id': user_id, 'count': 50, 'extended': 1})
-            return [g['name'] for g in subs.get('items', [])]
-        return [g['name'] for g in subs.get('items', [])]
+        # Сразу запрашиваем до 50 групп - этого достаточно для анализа интересов
+        response = vk.method('groups.get', {'user_id': user_id, 'count': 50, 'extended': 0})
+        
+        if isinstance(response, dict):
+            items = response.get('items', [])
+            return [g['name'] for g in items if isinstance(g, dict) and 'name' in g]
+        elif isinstance(response, list):
+            # Если вдруг вернется сразу список (редко)
+            return [g['name'] for g in response if isinstance(g, dict) and 'name' in g]
+        else:
+            return []
+            
     except vk_api.exceptions.ApiError as e:
         if e.code == 6: # Too many requests
-            time.sleep(1)
+            time.sleep(1.5)
             return get_profile_subscriptions(vk, user_id)
         elif e.code == 15: # Access denied - профиль закрыт
-            print(f"   ⚠️ Профиль {user_id} закрыт (доступ запрещён)")
-            return None
-        return [] # Приватный профиль или ошибки
+            return []
+        elif e.code == 1: # Unknown error
+            time.sleep(1)
+            return []
+        return []
     except Exception as e:
-        print(f"   ⚠️ Ошибка получения подписок {user_id}: {e}")
+        # Любая другая ошибка - не ломаем весь скрипт, просто пропускаем подписки
         return []
 
 # --- ПРОМПТЫ ДЛЯ АНАЛИЗА (Scientific Approach) ---
