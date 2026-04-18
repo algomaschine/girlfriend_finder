@@ -8,6 +8,11 @@ import subprocess
 import sys
 from datetime import datetime
 from tqdm import tqdm
+try:
+    import plotext as plt
+    PLOT_AVAILABLE = True
+except ImportError:
+    PLOT_AVAILABLE = False
 
 # --- Конфигурация ---
 CONFIG_FILE = 'config.json'
@@ -19,6 +24,23 @@ OLLAMA_URL = "http://localhost:11434"
 # Лимиты
 MIN_BIRTH_YEAR = 1985
 MAX_PROFILES_PER_RUN = 0 # 0 = без лимита, обрабатывать все новые
+
+# Статистика отсева
+rejection_stats = {
+    'total_checked': 0,
+    'no_photo': 0,
+    'wrong_sex': 0,
+    'not_moscow': 0,
+    'closed_profile': 0,
+    'in_relationship': 0,
+    'deactivated': 0,
+    'age_filter': 0,
+    'inactive': 0,
+    'llm_error': 0,
+    'low_score': 0,
+    'passed_to_llm': 0,
+    'final_success': 0
+}
 
 def load_config():
     try:
@@ -242,6 +264,7 @@ def generate_message(name, analysis, profile_data):
         return f"Привет, {name}! Твой профиль меня заинтриговал. Давай знакомиться!"
 
 def analyze_single_profile(vk, profile):
+    global rejection_stats
     uid = profile['id']
     name = profile.get('first_name', '')
     bdate = profile.get('bdate', '')
@@ -250,26 +273,31 @@ def analyze_single_profile(vk, profile):
     # 0. Проверка на деактивированный профиль (забанен/удален)
     # Если first_name пустой или профиль помечен как deactivation
     if not name or name.strip() == '':
+        rejection_stats['deactivated'] += 1
         print(f"   ⚠️ Профиль {uid} деактивирован (пустое имя) (пропущен)")
         return None, "Профиль деактивирован"
     
     # Проверка photo_200 или photo_max - если нет фото, пропускаем
     has_photo = profile.get('photo_200') or profile.get('photo_max') or profile.get('photo_100')
     if not has_photo:
+        rejection_stats['no_photo'] += 1
         print(f"   ⚠️ Профиль {uid} без аватарки (пропущен)")
         return None, "Нет фото профиля"
 
     # 1. Фильтр по году
     if year and year < MIN_BIRTH_YEAR:
+        rejection_stats['age_filter'] += 1
         return None, f"Отклонено: год рождения {year} < {MIN_BIRTH_YEAR}"
     if not year:
         # Если года нет, можно либо пропустить, либо оставить на усмотрение.
         # По ТЗ строгий фильтр, значит пропускаем, если не можем подтвердить >= 1985.
         # Но иногда ВК скрывает год у молодых. Оставим решение: если года нет вообще - пропускаем.
+        rejection_stats['age_filter'] += 1
         return None, "Отклонено: год рождения скрыт или не указан"
 
     # 2. Проверка is_closed (профиль открыт/закрыт)
     if profile.get('is_closed', False):
+        rejection_stats['closed_profile'] += 1
         print(f"   ⚠️ Профиль {uid} закрыт (пропущен)")
         return None, "Профиль закрыт"
 
@@ -282,11 +310,13 @@ def analyze_single_profile(vk, profile):
         
         # Если не был в сети больше 90 дней - считаем неактивным
         if days_since_seen > 90:
+            rejection_stats['inactive'] += 1
             print(f"   ⚠️ Профиль {uid} неактивен ({int(days_since_seen)} дн. назад) (пропущен)")
             return None, "Профиль неактивен"
 
     # 4. Фильтр по городу (уже отфильтровано на этапе сбора, но перепроверим)
     if not is_moscow(profile.get('city')):
+        rejection_stats['not_moscow'] += 1
         return None, "Отклонено: не Москва"
 
     # 5. Повторная проверка семейного положения (только свободные)
@@ -294,6 +324,7 @@ def analyze_single_profile(vk, profile):
     # relation: 0-не указано, 1-не замужем, 2-есть друг, 3-помолвлена, 
     # 4-замужем, 5-в активном поиске, 6-влюблена, 7-влюблена, 8-в гражданском браке
     if relation in [2, 3, 4, 7, 8]:
+        rejection_stats['in_relationship'] += 1
         print(f"   ⚠️ Профиль {uid} имеет статус отношений (relation={relation}) (пропущен)")
         return None, "Есть отношения"
 
@@ -304,8 +335,12 @@ def analyze_single_profile(vk, profile):
         subs = get_profile_subscriptions(vk, uid)
         # Если получили None (закрытый профиль), пропускаем
         if subs is None:
+            rejection_stats['closed_profile'] += 1
             return None, "Подписки недоступны (закрытый профиль)"
         profile['subscriptions'] = subs # Сохраняем в профиль
+
+    # Профиль прошел все фильтры, отправляем на LLM
+    rejection_stats['passed_to_llm'] += 1
 
     # Формирование контекста
     context = {
@@ -325,6 +360,7 @@ def analyze_single_profile(vk, profile):
     # 4. Запрос к LLM (Анализ)
     raw_json = call_llm(user_prompt)
     if not raw_json:
+        rejection_stats['llm_error'] += 1
         return None, "Ошибка LLM: нет ответа"
 
     # Парсинг JSON анализа
@@ -333,6 +369,7 @@ def analyze_single_profile(vk, profile):
         clean_json = re.sub(r'```json\s*|\s*```', '', raw_json).strip()
         analysis = json.loads(clean_json)
     except json.JSONDecodeError:
+        rejection_stats['llm_error'] += 1
         return None, f"Ошибка парсинга JSON анализа: {raw_json[:100]}"
 
     # 5. Генерация сообщения (если анализ успешен и скор высокий)
@@ -342,7 +379,9 @@ def analyze_single_profile(vk, profile):
     # Генерируем сообщение даже для средних кандидатов, но помечаем
     if score > 40:
         message = generate_message(name, analysis, context)
+        rejection_stats['final_success'] += 1
     else:
+        rejection_stats['low_score'] += 1
         message = "Профиль проанализирован, но совместимость низкая. Сообщение не генерировалось."
 
     result = {
@@ -384,10 +423,13 @@ def main():
     existing_ids = {item['profile']['id'] for item in existing_data}
     
     new_candidates = []
+    batch_stats = {k: 0 for k in rejection_stats.keys()}
+    
     for group_id in group_ids_list:
         print(f"\n   📋 Обработка группы: {group_id}")
         offset = 0
         count = 100
+        batch_rejections = {k: 0 for k in rejection_stats.keys()}
 
         # Собираем пачками, сразу фильтруя по полу, городу и семейному положению (базово)
         while True:
@@ -396,22 +438,31 @@ def main():
                     'group_id': group_id,
                     'offset': offset,
                     'count': count,
-                    'fields': 'sex,city,bdate,status,relation,is_closed,last_seen'
+                    'fields': 'sex,city,bdate,status,relation,is_closed,last_seen,photo_200,photo_max,photo_100,first_name'
                 })
                 items = resp.get('items', [])
                 if not items:
                     break
 
                 for p in items:
+                    rejection_stats['total_checked'] += 1
+                    batch_rejections['total_checked'] += 1
+                    
                     if p['id'] in existing_ids:
                         continue
                     if p.get('sex') != 1: # Только женщины
+                        batch_rejections['wrong_sex'] += 1
+                        rejection_stats['wrong_sex'] += 1
                         continue
                     if not is_moscow(p.get('city')):
+                        batch_rejections['not_moscow'] += 1
+                        rejection_stats['not_moscow'] += 1
                         continue
                     
                     # Проверка на закрытый профиль уже на этапе сбора
                     if p.get('is_closed', False):
+                        batch_rejections['closed_profile'] += 1
+                        rejection_stats['closed_profile'] += 1
                         continue
                     
                     # Проверка семейного положения (только свободные)
@@ -419,21 +470,41 @@ def main():
                     # relation: 0-не указано, 1-не замужем, 2-есть друг, 3-помолвлена, 
                     # 4-замужем, 5-в активном поиске, 6-влюблена, 7-влюблена, 8-в гражданском браке
                     if relation in [2, 3, 4, 7, 8]:
+                        batch_rejections['in_relationship'] += 1
+                        rejection_stats['in_relationship'] += 1
                         continue
                     
                     # Проверка на деактивированный профиль (пустое имя)
                     if not p.get('first_name') or p.get('first_name', '').strip() == '':
+                        batch_rejections['deactivated'] += 1
+                        rejection_stats['deactivated'] += 1
                         continue
                     
                     # Проверка наличия фото (userpic)
                     has_photo = p.get('photo_200') or p.get('photo_max') or p.get('photo_100')
                     if not has_photo:
+                        batch_rejections['no_photo'] += 1
+                        rejection_stats['no_photo'] += 1
                         continue
 
                     new_candidates.append(p)
 
                 offset += count
-                print(f"      ...проверено {offset} участников, найдено подходящих: {len(new_candidates)}")
+                
+                # Вывод статистики каждые 100 профилей
+                if offset % 100 == 0:
+                    total = batch_rejections['total_checked']
+                    passed = len(new_candidates)
+                    print(f"      ...проверено {offset} участников, найдено подходящих: {passed}")
+                    
+                    # Показываем топ-3 причины отсева для этого батча
+                    reasons = [(k, v) for k, v in batch_rejections.items() if k != 'total_checked' and v > 0]
+                    reasons.sort(key=lambda x: x[1], reverse=True)
+                    if reasons:
+                        top_reasons = reasons[:3]
+                        reason_str = ", ".join([f"{k.replace('_', ' ')}:{v}" for k, v in top_reasons])
+                        print(f"         ⚠️ Отсев: {reason_str}")
+                
                 time.sleep(0.2)
 
             except Exception as e:
@@ -442,6 +513,8 @@ def main():
 
     if not new_candidates:
         print("✅ Нет новых кандидатов для обработки.")
+        # Вывод итоговой статистики отсева даже если нет кандидатов
+        print_rejection_stats()
         return
 
     print(f"\n🚀 Найдено {len(new_candidates)} новых кандидатов. Начинаем глубокий анализ...")
@@ -465,6 +538,9 @@ def main():
     print("\n" + "="*60)
     print(f"✅ ГОТОВО! Всего в базе: {len(results)} профилей с анализом.")
     print(f"💾 Файл: {FINAL_OUTPUT_FILE}")
+    
+    # Вывод итоговой статистики отсева
+    print_rejection_stats()
 
     # Вывод топ-3 для примера
     top = sorted([r for r in results if r['analysis'].get('compatibility_score', 0) > 0],
@@ -476,6 +552,68 @@ def main():
             score = t['analysis'].get('compatibility_score')
             msg_preview = t['generated_message'][:50].replace('\n', ' ')
             print(f"- {name}: Скор {score}. Сообщение: {msg_preview}...")
+
+
+def print_rejection_stats():
+    """Выводит красивую инфографику статистики отсева используя Plotext"""
+    global rejection_stats
+    
+    print("\n" + "="*60)
+    print("📊 СТАТИСТИКА ОТСЕВА ПРОФИЛЕЙ")
+    print("="*60)
+    
+    total = rejection_stats['total_checked']
+    if total == 0:
+        print("Нет данных для статистики.")
+        return
+    
+    # Категории для отображения (исключаем служебные)
+    categories = [
+        ('wrong_sex', 'Не женский пол'),
+        ('not_moscow', 'Не Москва'),
+        ('closed_profile', 'Закрытый профиль'),
+        ('in_relationship', 'Есть отношения'),
+        ('deactivated', 'Деактивирован'),
+        ('no_photo', 'Нет фото'),
+        ('age_filter', 'Не подходит возраст'),
+        ('inactive', 'Неактивен >90 дней'),
+        ('llm_error', 'Ошибка LLM'),
+        ('low_score', 'Низкий скор совместимости'),
+    ]
+    
+    labels = [c[1] for c in categories]
+    values = [rejection_stats[c[0]] for c in categories]
+    
+    # Текстовая таблица
+    print(f"\n📈 Всего проверено профилей: {total}")
+    print(f"✅ Прошло на LLM анализ: {rejection_stats['passed_to_llm']}")
+    print(f"🎯 Итоговый успех (скор >40): {rejection_stats['final_success']}")
+    print(f"📉 Общий процент отсева: {100*(total - rejection_stats['final_success'])/total:.1f}%")
+    
+    print("\n🔍 Детализация по причинам отсева:")
+    print("-"*50)
+    
+    # Сортируем по убыванию
+    sorted_cats = sorted(zip(categories, values), key=lambda x: x[1], reverse=True)
+    
+    for cat_info, val in sorted_cats:
+        _, label = cat_info
+        if val > 0:
+            pct = 100 * val / total
+            bar_len = int(pct / 2)  # Масштабирование для консоли
+            bar = "█" * bar_len
+            print(f"{label:25s} |{bar}| {val} ({pct:.1f}%)")
+    
+    # График Plotext если доступен
+    if PLOT_AVAILABLE and total > 0:
+        print("\n📉 Визуализация (Plotext):")
+        plt.clf()
+        plt.bar(labels, values)
+        plt.title(f"Причины отсева профилей (всего: {total})")
+        plt.xlabel("Причина")
+        plt.ylabel("Количество")
+        plt.xticks(rotation=45)
+        plt.show()
 
 if __name__ == '__main__':
     main()
