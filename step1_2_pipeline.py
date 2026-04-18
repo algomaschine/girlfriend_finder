@@ -36,6 +36,7 @@ rejection_stats = {
     'deactivated': 0,
     'age_filter': 0,
     'inactive': 0,
+    'cannot_message': 0,
     'llm_error': 0,
     'low_score': 0,
     'passed_to_llm': 0,
@@ -388,8 +389,8 @@ def analyze_single_profile(vk, profile):
     score = analysis.get('compatibility_score', 0)
     message = ""
 
-    # Генерируем сообщение даже для средних кандидатов, но помечаем
-    if score > 40:
+    # Генерируем сообщение ТОЛЬКО для очень высоких кандидатов (score >= 90)
+    if score >= 90:
         message = generate_message(name, analysis, context)
         rejection_stats['final_success'] += 1
     else:
@@ -450,7 +451,7 @@ def main():
                     'group_id': group_id,
                     'offset': offset,
                     'count': count,
-                    'fields': 'sex,city,bdate,status,relation,is_closed,last_seen,photo_200,photo_max,photo_100,first_name'
+                    'fields': 'sex,city,bdate,status,relation,is_closed,last_seen,photo_200,photo_max,photo_100,first_name,can_message'
                 })
                 items = resp.get('items', [])
                 if not items:
@@ -498,6 +499,16 @@ def main():
                         batch_rejections['no_photo'] += 1
                         rejection_stats['no_photo'] += 1
                         continue
+                    
+                    # Проверка возможности написать сообщение
+                    # can_message: 0 - нельзя, 1 - можно, 2 - ограниченно (только если есть общие друзья/группы)
+                    # Нам нужны только те, кому можно написать точно (1) или с высокой вероятностью
+                    # Если can_message == 0, значит писать нельзя вообще
+                    can_msg = p.get('can_message', 0)
+                    if can_msg == 0:
+                        batch_rejections['cannot_message'] += 1
+                        rejection_stats['cannot_message'] += 1
+                        continue
 
                     new_candidates.append(p)
 
@@ -534,8 +545,14 @@ def main():
     # Обработка
     results = existing_data.copy()
 
+    # Лимит на количество обрабатываемых профилей за один запуск
+    profiles_to_process = new_candidates
+    if MAX_PROFILES_PER_RUN > 0 and len(profiles_to_process) > MAX_PROFILES_PER_RUN:
+        print(f"⚠️ Лимит активен: обрабатываем только первые {MAX_PROFILES_PER_RUN} из {len(new_candidates)}")
+        profiles_to_process = new_candidates[:MAX_PROFILES_PER_RUN]
+
     # Используем tqdm для прогресс-бара
-    for p in tqdm(new_candidates, desc="Анализ профилей", unit="prof"):
+    for p in tqdm(profiles_to_process, desc="Анализ профилей", unit="prof"):
         res, err = analyze_single_profile(vk, p)
 
         if res:
@@ -587,6 +604,7 @@ def print_rejection_stats():
         ('in_relationship', 'Есть отношения'),
         ('deactivated', 'Деактивирован'),
         ('no_photo', 'Нет фото'),
+        ('cannot_message', 'Нельзя написать'),
         ('age_filter', 'Не подходит возраст'),
         ('inactive', 'Неактивен >90 дней'),
         ('llm_error', 'Ошибка LLM'),
@@ -629,3 +647,8 @@ def print_rejection_stats():
 
 if __name__ == '__main__':
     main()
+    # Запуск генерации отчета после завершения анализа
+    try:
+        subprocess.run(["python", os.path.join(os.path.dirname(__file__), "step3_generate_report.py")], check=True)
+    except Exception as e:
+        print(f"⚠️ Не удалось запустить step3_generate_report.py: {e}")
